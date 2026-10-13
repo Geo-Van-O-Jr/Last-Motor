@@ -2,6 +2,8 @@ import * as CANNON from 'cannon-es';
 import * as THREE from 'three';
 import { VehicleClassType, VEHICLE_CLASSES, VehicleState, TakedownType } from '../types/game';
 import { CarVisualRefs } from './carBuilder';
+import { DamageSystem } from './damageSystem';
+import { ROYALE_CONFIG } from './royaleConfig';
 
 export interface VehiclePhysicsEntity {
   id: string;
@@ -36,13 +38,17 @@ export interface CollisionResult {
 export class PhysicsEngine {
   public world: CANNON.World;
   public vehicles: Map<string, VehiclePhysicsEntity> = new Map();
+  private carMaterial = new CANNON.Material('royale-cars');
 
-  constructor() {
+  private beforeStep = new Map<number, CANNON.Vec3>();
+
+  constructor(public damage = new DamageSystem()) {
     this.world = new CANNON.World({
       gravity: new CANNON.Vec3(0, -25, 0),
     });
     this.world.defaultContactMaterial.friction = 0.2;
     this.world.defaultContactMaterial.restitution = 0.3;
+    this.world.addContactMaterial(new CANNON.ContactMaterial(this.carMaterial, this.carMaterial, { friction: 0.15, restitution: 0.05 }));
   }
 
   public registerVehicle(
@@ -67,6 +73,7 @@ export class PhysicsEngine {
       shape: boxShape,
       linearDamping: 0.1,
       angularDamping: 0.9,
+      material: this.carMaterial,
     });
 
     // Lock pitch and roll so cars NEVER flip upside down or glitch through floor!
@@ -98,6 +105,9 @@ export class PhysicsEngine {
       color,
       position: { x: spawnPos.x, y: 0, z: spawnPos.z },
       heading: spawnRotY,
+      item: null, itemCooldown: 0, itemAcquired: 0,
+      shieldTime: 0, turboTime: 0, doubleAmmoTime: 0,
+      rocketThreats: 0, lockTargetName: null,
     };
 
     const entity: VehiclePhysicsEntity = {
@@ -163,7 +173,7 @@ export class PhysicsEngine {
       const turnRate = effectiveHandling * (0.35 + 0.65 * speedFactor);
       const dirSign = entity.forwardSpeed >= -0.5 ? 1 : -1;
 
-      // Invert steer because -steer is turning left (positive Y yaw)
+      // Negative input produces positive Y yaw (left); reverse flips naturally.
       state.heading += -inputs.steer * turnRate * dt * dirSign;
     }
 
@@ -255,160 +265,50 @@ export class PhysicsEngine {
 
   public checkCollisions(now: number): CollisionResult[] {
     const results: CollisionResult[] = [];
-    const activeVehicles = Array.from(this.vehicles.values()).filter((v) => !v.state.isDead);
+    const byBody = new Map(Array.from(this.vehicles.values()).map(v => [v.body.id, v]));
+    const seen = new Set<string>();
+    for (const contact of this.world.contacts) {
+      const a = byBody.get(contact.bi.id);
+      const b = byBody.get(contact.bj.id);
+      if (!a || !b || a.state.isDead || b.state.isDead) continue;
+      const key = [a.id, b.id].sort().join(':');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const rearmAt = a.contactCooldowns.get(b.id) ?? -Infinity;
+      // Continuous contact extends the lockout, so rubbing cannot farm damage.
+      a.contactCooldowns.set(b.id, now + ROYALE_CONFIG.collision.cooldownSec);
+      b.contactCooldowns.set(a.id, now + ROYALE_CONFIG.collision.cooldownSec);
+      if (now < rearmAt) continue;
 
-    for (let i = 0; i < activeVehicles.length; i++) {
-      for (let j = i + 1; j < activeVehicles.length; j++) {
-        const vA = activeVehicles[i];
-        const vB = activeVehicles[j];
-
-        const distSq = vA.body.position.distanceSquared(vB.body.position);
-        const radiusA = VEHICLE_CLASSES[vA.classType].length * 0.48;
-        const radiusB = VEHICLE_CLASSES[vB.classType].length * 0.48;
-        const collideDist = radiusA + radiusB;
-
-        if (distSq < collideDist * collideDist) {
-          const cooldownA = vA.contactCooldowns.get(vB.id) || 0;
-          if (now < cooldownA) continue;
-
-          const res = this.resolveVehicleCollision(vA, vB, now);
-          if (res) {
-            results.push(res);
-            vA.contactCooldowns.set(vB.id, now + 350);
-            vB.contactCooldowns.set(vA.id, now + 350);
-          }
-        }
+      const va = this.beforeStep.get(a.body.id) ?? a.body.velocity;
+      const vb = this.beforeStep.get(b.body.id) ?? b.body.velocity;
+      const closing = Math.max(0, va.vsub(vb).dot(contact.ni));
+      const kmh = closing * 3.6;
+      // Physical response is handled by Cannon. Transfer only a bounded change
+      // into the arcade velocity memory, without teleports or random impulses.
+      for (const car of [a, b]) {
+        const heading = car.state.heading;
+        const projectedForward = car.body.velocity.x * Math.sin(heading) + car.body.velocity.z * Math.cos(heading);
+        const projectedSide = car.body.velocity.x * Math.cos(heading) - car.body.velocity.z * Math.sin(heading);
+        const cap = ROYALE_CONFIG.collision.maxImpulseMs;
+        car.forwardSpeed += THREE.MathUtils.clamp(projectedForward - car.forwardSpeed, -cap, cap);
+        car.lateralSpeed += THREE.MathUtils.clamp(projectedSide - car.lateralSpeed, -cap, cap);
       }
+      if (kmh < ROYALE_CONFIG.collision.harmlessBelowKmh) continue;
+      const attacker = a.state.speedKmh >= b.state.speedKmh ? a : b;
+      const victim = attacker === a ? b : a;
+      const rawDamage = Math.min(ROYALE_CONFIG.collision.maxDamage, (kmh - ROYALE_CONFIG.collision.harmlessBelowKmh) * 0.09);
+      const amount = this.damage.apply(victim, rawDamage, 'collisions', now, attacker, 'COLISÃO');
+      results.push({ attackerId: attacker.id, victimId: victim.id, damage: amount,
+        type: 'RAM', impactSpeed: kmh, isDeadly: victim.state.isDead,
+        hitPosition: new THREE.Vector3((a.body.position.x + b.body.position.x) / 2, 1, (a.body.position.z + b.body.position.z) / 2) });
     }
-
     return results;
   }
 
-  private resolveVehicleCollision(
-    vA: VehiclePhysicsEntity,
-    vB: VehiclePhysicsEntity,
-    now: number
-  ): CollisionResult | null {
-    // Relative speed in km/h
-    const relSpeedMs = Math.hypot(
-      vA.body.velocity.x - vB.body.velocity.x,
-      vA.body.velocity.z - vB.body.velocity.z
-    );
-    const relSpeedKmh = relSpeedMs * 3.6;
-
-    if (relSpeedKmh < 15) {
-      // Separate bodies gently if touching
-      this.separateBodies(vA.body, vB.body);
-      return null;
-    }
-
-    // Determine attacker vs victim
-    const speedA = vA.state.speedKmh;
-    const speedB = vB.state.speedKmh;
-
-    let attacker = vA;
-    let victim = vB;
-
-    if (speedB > speedA * 1.1) {
-      attacker = vB;
-      victim = vA;
-    }
-
-    const attConfig = VEHICLE_CLASSES[attacker.classType];
-    const vicConfig = VEHICLE_CLASSES[victim.classType];
-
-    // Direction from attacker to victim
-    const dx = victim.body.position.x - attacker.body.position.x;
-    const dz = victim.body.position.z - attacker.body.position.z;
-    const dist = Math.hypot(dx, dz) || 1;
-    const normX = dx / dist;
-    const normZ = dz / dist;
-
-    // Impact type
-    let impactType: TakedownType = 'RAM';
-    const vicRightX = Math.cos(victim.state.heading);
-    const vicRightZ = -Math.sin(victim.state.heading);
-    const sideDot = Math.abs(normX * vicRightX + normZ * vicRightZ);
-
-    if (sideDot > 0.55) {
-      impactType = 'SIDE_SLAM';
-    } else {
-      impactType = 'RAM';
-    }
-
-    // Damage calculations
-    const speedFactor = (relSpeedKmh - 12) / 100;
-    const massFactor = attConfig.mass / vicConfig.mass;
-    const boostBonus = attacker.state.isBoosting ? 1.6 : 1.0;
-
-    let baseDmg = 28 * speedFactor * attConfig.ramPower * massFactor * boostBonus;
-    baseDmg = Math.max(10, Math.min(baseDmg, 85));
-
-    victim.state.hp = Math.max(0, victim.state.hp - Math.round(baseDmg));
-    victim.state.lastHitBy = attacker.name;
-    victim.state.lastHitTime = now;
-    attacker.state.damageDealt += Math.round(baseDmg);
-
-    // Attacker takes small recoil damage unless boosting
-    if (!attacker.state.isBoosting) {
-      const recoil = baseDmg * 0.15;
-      attacker.state.hp = Math.max(0, attacker.state.hp - Math.round(recoil));
-    }
-
-    // Reward attacker with turbo boost
-    attacker.state.boost = Math.min(attacker.state.maxBoost, attacker.state.boost + 30);
-
-    // Physical bounce & push separation
-    const pushStrength = Math.min(relSpeedMs * 1.2, 28) * (attacker.state.isBoosting ? 1.5 : 1.0);
-    victim.body.position.x += normX * 1.5;
-    victim.body.position.z += normZ * 1.5;
-    victim.forwardSpeed *= -0.3; // bounce
-    victim.lateralSpeed += (Math.random() > 0.5 ? 1 : -1) * pushStrength * 0.7;
-
-    attacker.forwardSpeed *= 0.65; // speed penalty on hit
-    attacker.stunTimer = 0.15;
-
-    // Fatal takedown check
-    const isDeadly = victim.state.hp <= 0;
-    if (isDeadly && !victim.state.isDead) {
-      victim.state.isDead = true;
-      attacker.state.takedowns += 1;
-      attacker.state.boost = attacker.state.maxBoost; // full refill!
-    }
-
-    const hitPosition = new THREE.Vector3(
-      (vA.body.position.x + vB.body.position.x) / 2,
-      1.0,
-      (vA.body.position.z + vB.body.position.z) / 2
-    );
-
-    return {
-      attackerId: attacker.id,
-      victimId: victim.id,
-      damage: Math.round(baseDmg),
-      type: impactType,
-      impactSpeed: Math.round(relSpeedKmh),
-      hitPosition,
-      isDeadly,
-    };
-  }
-
-  private separateBodies(bA: CANNON.Body, bB: CANNON.Body) {
-    const dx = bB.position.x - bA.position.x;
-    const dz = bB.position.z - bA.position.z;
-    const dist = Math.hypot(dx, dz) || 1;
-    const overlap = 3.5 - dist;
-    if (overlap > 0) {
-      const sepX = (dx / dist) * overlap * 0.5;
-      const sepZ = (dz / dist) * overlap * 0.5;
-      bB.position.x += sepX;
-      bB.position.z += sepZ;
-      bA.position.x -= sepX;
-      bA.position.z -= sepZ;
-    }
-  }
-
   public step(dt: number) {
+    this.beforeStep.clear();
+    this.vehicles.forEach(v => this.beforeStep.set(v.body.id, v.body.velocity.clone()));
     this.world.step(1 / 60, dt, 3);
   }
 }

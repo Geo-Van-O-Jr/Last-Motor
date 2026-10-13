@@ -221,6 +221,30 @@ class SoundManager {
     }
   }
 
+  private playTone(frequency: number, end: number, duration: number, type: OscillatorType) {
+    this.initContext();
+    if (!this.ctx || this.isMuted) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(frequency, now);
+    osc.frequency.exponentialRampToValueAtTime(end, now + duration);
+    gain.gain.setValueAtTime(0.12, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+    osc.connect(gain); gain.connect(this.ctx.destination);
+    osc.start(now); osc.stop(now + duration);
+    osc.onended = () => { osc.disconnect(); gain.disconnect(); };
+  }
+
+  public playWeapon(kind: 'ROCKET' | 'MINE' | 'ENERGY') {
+    if (kind === 'ENERGY') this.playTone(1100, 180, 0.16, 'sawtooth');
+    else if (kind === 'MINE') this.playTone(220, 460, 0.12, 'square');
+    else this.playTone(320, 70, 0.32, 'triangle');
+  }
+
+  public playPickup() { this.playTone(500, 1200, 0.2, 'sine'); }
+
   public playCollision(intensity: number = 0.5) {
     this.initContext();
     if (!this.ctx || this.isMuted) return;

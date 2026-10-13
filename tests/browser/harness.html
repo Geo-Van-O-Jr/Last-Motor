@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="pt-BR"><head><meta charset="UTF-8"><title>Motor Royale runtime tests</title></head>
+<body style="margin:0"><div id="game" style="width:100vw;height:100vh"></div>
+<script type="module">
+import { GameEngine } from '/src/game/GameEngine.ts';
+window.results = { state: null, end: null, logs: [] };
+window.engine = new GameEngine(document.querySelector('#game'), {
+  onStateUpdate: state => window.results.state = state,
+  onCombatLog: event => window.results.logs.push(event),
+  onMatchEnd: stats => window.results.end = stats,
+  onTakedownBanner: () => {},
+});
+</script></body></html>

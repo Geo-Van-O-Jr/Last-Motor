@@ -54,7 +54,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({ onStartGame, onCarPreview })
               ÚLTIMO MOTOR
             </h1>
             <p className="text-xs sm:text-sm font-semibold tracking-widest text-slate-400 uppercase">
-              Arena Zero • Combate Automobilístico 3D
+              Motor Royale • Arena Zero
             </p>
           </div>
         </div>
@@ -226,14 +226,14 @@ export const MainMenu: React.FC<MainMenuProps> = ({ onStartGame, onCarPreview })
               <div>
                 <div className="flex justify-between text-[11px] font-bold text-slate-400 mb-1">
                   <span className="flex items-center gap-1">
-                    <Flame className="w-3 h-3 text-rose-500" /> IMPACTO
+                    <Flame className="w-3 h-3 text-rose-500" /> MASSA
                   </span>
-                  <span>{currentConfig.ramPower}x</span>
+                  <span>{currentConfig.mass} kg</span>
                 </div>
                 <div className="h-2 rounded-full bg-slate-800 overflow-hidden">
                   <div
                     className="h-full bg-rose-500 rounded-full transition-all duration-300"
-                    style={{ width: `${(currentConfig.ramPower / 2.0) * 100}%` }}
+                    style={{ width: `${(currentConfig.mass / 2400) * 100}%` }}
                   />
                 </div>
               </div>
@@ -254,7 +254,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({ onStartGame, onCarPreview })
             </div>
 
             <h3 className="text-xl font-black italic text-white uppercase">
-              Batalha até a destruição total
+              Dirija. Arme-se. Sobreviva.
             </h3>
 
             <ul className="text-xs text-slate-300 space-y-2.5">
@@ -267,13 +267,13 @@ export const MainMenu: React.FC<MainMenuProps> = ({ onStartGame, onCarPreview })
               <li className="flex items-start gap-2">
                 <span className="text-amber-400 font-bold">▶</span>
                 <span>
-                  <strong>Colisões brutais:</strong> Use velocidade, turbo e derrapagem para executar <em>Takedowns</em> e <em>Side Slams</em> devastadores.
+                  <strong>Armas e power-ups:</strong> Atravesse pickups dourados e use <strong>E</strong> para lançar foguetes, minas, energia ou ativar seu item. Um slot, sem mira com mouse.
                 </span>
               </li>
               <li className="flex items-start gap-2">
                 <span className="text-amber-400 font-bold">▶</span>
                 <span>
-                  <strong>Perímetro Elétrico:</strong> Após algum tempo, a barreira de segurança diminui, forçando o confronto final.
+                  <strong>Zona progressiva:</strong> Observe o temporizador e o anel amarelo da próxima área. Colisões são secundárias; o último veículo sobrevivente vence.
                 </span>
               </li>
             </ul>
@@ -326,6 +326,10 @@ export const MainMenu: React.FC<MainMenuProps> = ({ onStartGame, onCarPreview })
               <div className="flex justify-between py-1.5 border-b border-slate-800/80">
                 <span className="text-slate-400">Turbo Nitro</span>
                 <span className="font-mono font-bold text-cyan-400 bg-slate-800 px-2 py-0.5 rounded">Shift</span>
+              </div>
+              <div className="flex justify-between py-1.5 border-b border-slate-800/80">
+                <span className="text-slate-400">Usar Arma / Power-up</span>
+                <span className="font-mono font-bold text-amber-400 bg-slate-800 px-2 py-0.5 rounded">E</span>
               </div>
               <div className="flex justify-between py-1.5 border-b border-slate-800/80">
                 <span className="text-slate-400">Alternar Câmera (Perto / Longe / Capô)</span>

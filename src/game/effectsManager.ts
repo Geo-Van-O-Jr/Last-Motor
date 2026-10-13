@@ -233,6 +233,7 @@ export class EffectsManager {
       if (oldest) {
         this.scene.remove(oldest);
         oldest.geometry.dispose();
+        (oldest.material as THREE.Material).dispose();
       }
     }
 
@@ -261,7 +262,7 @@ export class EffectsManager {
 
       if (p.life <= 0) {
         this.scene.remove(p.mesh);
-        p.mesh.geometry.dispose();
+        this.disposeParticle(p.mesh);
         this.particles.splice(i, 1);
         continue;
       }
@@ -302,14 +303,29 @@ export class EffectsManager {
   public clearAll() {
     this.particles.forEach((p) => {
       this.scene.remove(p.mesh);
-      p.mesh.geometry.dispose();
+      this.disposeParticle(p.mesh);
     });
     this.particles = [];
 
     this.skidmarks.forEach((sm) => {
       this.scene.remove(sm);
       sm.geometry.dispose();
+      (sm.material as THREE.Material).dispose();
     });
     this.skidmarks = [];
+  }
+
+  private disposeParticle(mesh: THREE.Mesh | THREE.Sprite) {
+    // Most particles share geometry; only the explosion ring owns its geometry.
+    const shared: THREE.BufferGeometry[] = [this.sparkGeo, this.smokeGeo, this.fireGeo, this.nitroGeo, this.debrisGeo];
+    if (mesh instanceof THREE.Mesh && !shared.includes(mesh.geometry)) mesh.geometry.dispose();
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    materials.forEach(material => material.dispose());
+  }
+
+  public destroy() {
+    this.clearAll();
+    [this.sparkGeo, this.smokeGeo, this.fireGeo, this.nitroGeo, this.debrisGeo].forEach(geometry => geometry.dispose());
+    [this.sparkMat, this.smokeMat, this.fireMat, this.nitroMat, this.debrisMat].forEach(material => material.dispose());
   }
 }

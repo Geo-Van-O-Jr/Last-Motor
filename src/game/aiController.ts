@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { VehiclePhysicsEntity } from './physicsEngine';
 import { AIArchetype } from '../types/game';
+import { CombatSystem } from './combatSystem';
 
 interface AIBotAgent {
   entity: VehiclePhysicsEntity;
@@ -27,7 +28,7 @@ export class AIController {
     });
   }
 
-  public update(dt: number, allEntities: VehiclePhysicsEntity[], arenaRadius: number) {
+  public update(dt: number, allEntities: VehiclePhysicsEntity[], arenaRadius: number, combat: CombatSystem, nextRadius = arenaRadius) {
     const aliveEntities = allEntities.filter((e) => !e.state.isDead);
 
     for (const [, bot] of this.bots) {
@@ -80,23 +81,49 @@ export class AIController {
         continue;
       }
 
-      // Calculate path to target
       const myPos = entity.body.position;
       const targetPos = targetEntity.body.position;
-
-      // Target prediction based on target velocity
-      const targetVel = targetEntity.body.velocity;
       const dist = Math.hypot(targetPos.x - myPos.x, targetPos.z - myPos.z);
-      const leadTime = Math.min(dist / 25, 1.2); // lead target
-      const predictedTarget = new THREE.Vector2(
-        targetPos.x + targetVel.x * leadTime,
-        targetPos.z + targetVel.z * leadTime
-      );
+      const targetVel = targetEntity.body.velocity;
+      const leadTime = Math.min(dist / 105, 0.7);
+      let destination = new THREE.Vector2(targetPos.x + targetVel.x * leadTime, targetPos.z + targetVel.z * leadTime);
+      // Maintain firing distance rather than aiming for a ram.
+      if (dist < 18) {
+        destination.x += Math.cos(entity.state.heading) * 14;
+        destination.y -= Math.sin(entity.state.heading) * 14;
+      }
+      const pickup = !entity.state.item ? combat.nearestPickup(entity, arenaRadius) : null;
+      if (pickup) destination.set(pickup.position.x, pickup.position.z);
+      const distFromCenter = Math.hypot(myPos.x, myPos.z);
+      if (distFromCenter > Math.min(arenaRadius - 7, nextRadius + 5)) destination.set(0, 0);
+      let desiredAngle = Math.atan2(destination.x - myPos.x, destination.y - myPos.z);
 
-      // Desired angle towards predicted target
-      const dx = predictedTarget.x - myPos.x;
-      const dz = predictedTarget.y - myPos.z;
-      const desiredAngle = Math.atan2(dx, dz); // 0 is along Z axis
+      const item = entity.state.item?.type;
+      const targetAngle = Math.atan2(targetPos.x - myPos.x, targetPos.z - myPos.z);
+      const aimDiff = Math.atan2(Math.sin(targetAngle - entity.state.heading), Math.cos(targetAngle - entity.state.heading));
+      const pursued = aliveEntities.some(e => e !== entity && e.body.position.distanceTo(myPos) < 22 &&
+        (e.body.position.x - myPos.x) * Math.sin(entity.state.heading) + (e.body.position.z - myPos.z) * Math.cos(entity.state.heading) < -3);
+      if ((item === 'ROCKET' && combat.lockTarget(entity, aliveEntities)) ||
+          (item === 'ENERGY' && Math.abs(aimDiff) < 0.2 && dist < 65 && combat.hasSight(entity, targetEntity)) ||
+          (item === 'MINE' && pursued) ||
+          (item === 'SHIELD' && (entity.state.rocketThreats > 0 || dist < 25 || entity.state.hp < entity.state.maxHp * 0.5)) ||
+          (item === 'REPAIR' && entity.state.hp <= entity.state.maxHp - 25) ||
+          (item === 'TURBO' && entity.state.boost < 65) || item === 'DOUBLE_AMMO') combat.activate(entity, allEntities);
+
+      // Break a missile's turn radius by moving across its path.
+      const threat = combat.shots.find(s => s.kind === 'ROCKET' && s.targetId === entity.id);
+      if (threat) desiredAngle = threat.heading + (archetype === 'defensive' ? -1.2 : 1.2);
+      // Look ahead against actual arena bodies, including ramps and barrels.
+      const origin = new THREE.Vector3(myPos.x, 0.8, myPos.z);
+      const look = 7 + entity.state.speedKmh / 12;
+      const endpoint = (angle: number) => origin.clone().add(new THREE.Vector3(Math.sin(angle) * look, 0, Math.cos(angle) * look));
+      if (combat.ray(origin, endpoint(entity.state.heading)).hasHit) {
+        const left = entity.state.heading + 0.9;
+        const right = entity.state.heading - 0.9;
+        const leftHit = combat.ray(origin, endpoint(left));
+        const rightHit = combat.ray(origin, endpoint(right));
+        desiredAngle = !leftHit.hasHit ? left : !rightHit.hasHit ? right : leftHit.distance > rightHit.distance ? left : right;
+      }
 
       // Current heading angle (yaw)
       let heading = entity.state.heading;
@@ -106,18 +133,7 @@ export class AIController {
       while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
       while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
 
-      // Wall avoidance: check distance from arena perimeter
-      const distFromCenter = Math.hypot(myPos.x, myPos.z);
-      if (distFromCenter > arenaRadius - 14) {
-        // Steer hard back towards arena center (0, 0)
-        const centerAngle = Math.atan2(-myPos.x, -myPos.z);
-        let centerDiff = centerAngle - heading;
-        while (centerDiff > Math.PI) centerDiff -= Math.PI * 2;
-        while (centerDiff < -Math.PI) centerDiff += Math.PI * 2;
-        angleDiff = centerDiff;
-      }
-
-      // Steer input mapping: negative steer turns right, positive turns left
+      // Original physics uses negative steer for positive yaw (left).
       let steerVal = Math.max(-1, Math.min(1, -angleDiff * 2.2));
 
       // Throttle decision
@@ -139,9 +155,9 @@ export class AIController {
 
         // Boost usage:
         // Use boost if lined up well and at good distance, or when HP is aggressive
-        if (absAngle < 0.35 && dist > 15 && dist < 50 && entity.state.boost > 20) {
+        if (absAngle < 0.35 && (pickup ? origin.distanceTo(pickup.position) > 18 : dist > 28) && dist < 65 && entity.state.boost > 20) {
           boostVal = true;
-        } else if (archetype === 'aggressive' && absAngle < 0.5 && dist < 40 && entity.state.boost > 30) {
+        } else if (threat && absAngle < 0.5 && entity.state.boost > 20) {
           boostVal = true;
         }
       }

@@ -7,6 +7,7 @@ import {
   CameraMode,
   TakedownEvent,
   MatchStats,
+  ZoneState,
 } from '../types/game';
 import { buildCarMesh, CarVisualRefs } from './carBuilder';
 import { buildArena, ArenaComponents } from './arenaBuilder';
@@ -14,6 +15,11 @@ import { PhysicsEngine, VehiclePhysicsEntity } from './physicsEngine';
 import { AIController } from './aiController';
 import { EffectsManager } from './effectsManager';
 import { soundManager } from './sound';
+import { CombatSystem } from './combatSystem';
+import { DamageSystem, DamageEvent } from './damageSystem';
+import { ZoneSystem } from './zoneSystem';
+import { readPlayerAxes } from './playerInput';
+import { ROYALE_CONFIG } from './royaleConfig';
 
 export interface GameEngineCallbacks {
   onStateUpdate: (state: {
@@ -21,6 +27,8 @@ export interface GameEngineCallbacks {
     survivors: number;
     matchTime: number;
     zoneRadius: number;
+    zone: ZoneState;
+    damageTotals: DamageSystem['totals'];
     allVehicles: VehicleState[];
   }) => void;
   onTakedownBanner: (banner: { title: string; subtitle: string; isPlayer: boolean }) => void;
@@ -38,6 +46,9 @@ export class GameEngine {
   private physics: PhysicsEngine;
   private ai: AIController;
   private effects: EffectsManager;
+  private damage: DamageSystem;
+  private combat: CombatSystem | null = null;
+  private zone = new ZoneSystem();
   private arena: ArenaComponents | null = null;
 
   private playerEntity: VehiclePhysicsEntity | null = null;
@@ -54,9 +65,9 @@ export class GameEngine {
 
   // Match progression
   private matchTime: number = 0;
+  private nextBroadcast = 0;
   private currentZoneRadius: number = 85;
-  private zoneShrinkDelay: number = 35;
-  private minZoneRadius: number = 22;
+  private useItemRequested = false;
 
   // Cinematic Slow-Motion
   private timeScale: number = 1.0;
@@ -120,7 +131,8 @@ export class GameEngine {
     this.scene.add(dirLight);
 
     // 5. Systems
-    this.physics = new PhysicsEngine();
+    this.damage = new DamageSystem(event => this.onDamage(event));
+    this.physics = new PhysicsEngine(this.damage);
     this.ai = new AIController();
     this.effects = new EffectsManager(this.scene);
 
@@ -135,6 +147,7 @@ export class GameEngine {
     window.addEventListener('resize', this.onResize);
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
+    window.addEventListener('blur', this.onBlur);
   }
 
   private onResize = () => {
@@ -147,9 +160,11 @@ export class GameEngine {
   };
 
   private onKeyDown = (e: KeyboardEvent) => {
+    if (this.isRunning && !this.isShowroom && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', 'KeyE'].includes(e.code)) e.preventDefault();
     this.keyState[e.code] = true;
+    if (e.code === 'KeyE' && !e.repeat) this.useItem();
 
-    if (e.code === 'KeyC') {
+    if (e.code === 'KeyC' && !e.repeat && !this.isPaused && !this.isShowroom) {
       this.toggleCamera();
     }
   };
@@ -157,6 +172,18 @@ export class GameEngine {
   private onKeyUp = (e: KeyboardEvent) => {
     this.keyState[e.code] = false;
   };
+
+  private onBlur = () => {
+    this.keyState = {};
+    this.virtualInputs = { throttle: 0, steer: 0, drift: false, boost: false };
+    this.useItemRequested = false;
+  };
+
+  public useItem() {
+    if (this.isRunning && !this.isPaused && !this.isShowroom) this.useItemRequested = true;
+  }
+
+  public returnToMenu(classType: VehicleClassType, color: string) { this.setupShowroom(classType, color); }
 
   public setVirtualInput(key: 'throttle' | 'steer', value: number) {
     this.virtualInputs[key] = value;
@@ -174,8 +201,11 @@ export class GameEngine {
 
   public setPaused(paused: boolean) {
     this.isPaused = paused;
+    this.onBlur();
     if (paused) {
       soundManager.stopEngine();
+      soundManager.setBoostSound(false);
+      soundManager.setDriftSound(false);
     } else {
       soundManager.startEngine();
     }
@@ -184,7 +214,7 @@ export class GameEngine {
   public updateShowroom(classType: VehicleClassType, color?: string) {
     if (!this.isShowroom) return;
     if (this.showroomCar) {
-      this.scene.remove(this.showroomCar.group);
+      this.disposeObject(this.showroomCar.group);
       this.showroomCar = null;
     }
     this.showroomCar = buildCarMesh(classType, color);
@@ -237,9 +267,11 @@ export class GameEngine {
 
     this.isShowroom = false;
     this.matchTime = 0;
+    this.nextBroadcast = 0;
     this.currentZoneRadius = 85;
     this.timeScale = 1.0;
     this.slowMoTimer = 0;
+    this.cameraShakeIntensity = 0;
     this.isPaused = false;
     this.isRunning = true;
 
@@ -311,6 +343,26 @@ export class GameEngine {
       this.allEntities.push(bEntity);
     }
 
+    this.combat = new CombatSystem(this.scene, this.damage, () => this.arena ? [
+      ...this.arena.staticBodies,
+      ...this.arena.barrels.filter(b => !b.exploded).map(b => b.body),
+    ] : [], {
+      shot: (kind, pos) => {
+        soundManager.playWeapon(kind);
+        this.effects.emitSparks(pos, new THREE.Vector3(0, 1, 0), 5);
+      },
+      explosion: (pos, kind) => {
+        if (kind === 'ENERGY') this.effects.emitSparks(pos, new THREE.Vector3(0, 1, 0), 15);
+        else this.effects.emitExplosion(pos, false);
+        soundManager.playCollision(kind === 'ENERGY' ? 0.3 : 0.65);
+      },
+      pickup: (car) => {
+        this.effects.emitSparks(new THREE.Vector3(car.body.position.x, 1.5, car.body.position.z), new THREE.Vector3(0, 1, 0), 12);
+        if (car.isPlayer) soundManager.playPickup();
+      },
+    });
+    this.combat.setupPickups();
+
     // Start audio
     soundManager.startEngine();
 
@@ -363,15 +415,11 @@ export class GameEngine {
     if (this.playerEntity && !this.playerEntity.state.isDead) {
       const inputs = this.playerEntity.inputs;
 
-      let throttle = this.virtualInputs.throttle;
-      if (this.keyState['KeyW'] || this.keyState['ArrowUp']) throttle = 1;
-      if (this.keyState['KeyS'] || this.keyState['ArrowDown']) throttle = -1;
-      inputs.throttle = throttle;
-
-      let steer = this.virtualInputs.steer;
-      if (this.keyState['KeyA'] || this.keyState['ArrowLeft']) steer = 1; // Left
-      if (this.keyState['KeyD'] || this.keyState['ArrowRight']) steer = -1; // Right
-      inputs.steer = steer;
+      const axes = readPlayerAxes(this.keyState, this.virtualInputs);
+      inputs.throttle = axes.throttle;
+      inputs.steer = axes.steer;
+      if (this.useItemRequested) this.combat?.activate(this.playerEntity, this.allEntities);
+      this.useItemRequested = false;
 
       inputs.drift = Boolean(this.keyState['Space'] || this.virtualInputs.drift);
       inputs.boost = Boolean(this.keyState['ShiftLeft'] || this.keyState['ShiftRight'] || this.virtualInputs.boost);
@@ -384,8 +432,9 @@ export class GameEngine {
     }
 
     // 2. AI Opponent update
-    if (this.arena) {
-      this.ai.update(simDt, this.allEntities, this.arena.arenaRadius);
+    const zoneState = this.zone.getState(this.matchTime);
+    if (this.arena && this.combat) {
+      this.ai.update(simDt, this.allEntities, zoneState.radius, this.combat, zoneState.nextRadius);
     }
 
     // 3. Update vehicle driving dynamics
@@ -398,7 +447,7 @@ export class GameEngine {
     this.physics.step(simDt);
 
     // 5. Vehicle-to-Vehicle Collisions
-    const collisionResults = this.physics.checkCollisions(performance.now());
+    const collisionResults = this.physics.checkCollisions(this.matchTime);
     collisionResults.forEach((col) => {
       const attacker = this.allEntities.find((e) => e.id === col.attackerId);
       const victim = this.allEntities.find((e) => e.id === col.victimId);
@@ -417,11 +466,9 @@ export class GameEngine {
         victim.body.position.z - attacker.body.position.z
       ).normalize();
       this.effects.emitSparks(col.hitPosition, hitNormal, Math.round(15 * intensity));
-
-      if (col.isDeadly) {
-        this.handleTakedown(attacker, victim, col.type, col.hitPosition);
-      }
     });
+
+    this.combat?.update(simDt, this.allEntities, zoneState.radius);
 
     // 6. Barrel collisions
     this.checkBarrelCollisions();
@@ -440,52 +487,36 @@ export class GameEngine {
 
     // 11. Broadcast state
     const aliveCount = this.allEntities.filter((e) => !e.state.isDead).length;
+    if (this.matchTime < this.nextBroadcast && this.isRunning) return;
+    this.nextBroadcast = this.matchTime + 0.05;
+    const snapshot = (state: VehicleState): VehicleState => ({ ...state, position: { ...state.position }, item: state.item ? { ...state.item } : null });
     this.callbacks.onStateUpdate({
-      player: this.playerEntity ? { ...this.playerEntity.state } : null,
+      player: this.playerEntity ? snapshot(this.playerEntity.state) : null,
       survivors: aliveCount,
       matchTime: Math.floor(this.matchTime),
       zoneRadius: Math.round(this.currentZoneRadius),
-      allVehicles: this.allEntities.map((e) => ({ ...e.state })),
+      zone: zoneState,
+      damageTotals: { ...this.damage.totals },
+      allVehicles: this.allEntities.map((e) => snapshot(e.state)),
     });
   }
 
-  private handleTakedown(
-    attacker: VehiclePhysicsEntity,
-    victim: VehiclePhysicsEntity,
-    type: 'TAKEDOWN' | 'RAM' | 'SIDE_SLAM' | 'ENVIRONMENTAL',
-    pos: THREE.Vector3
-  ) {
-    soundManager.playTakedown();
+  private onDamage(event: DamageEvent) {
+    const { victim, attacker, source, deadly, label } = event;
+    if ((victim.isPlayer || attacker?.isPlayer) && source === 'weapons') this.cameraShakeIntensity = Math.max(this.cameraShakeIntensity, 0.2);
+    if (!deadly) return;
+    const pos = new THREE.Vector3(victim.body.position.x, 1, victim.body.position.z);
     this.effects.emitExplosion(pos, true);
-
-    if (attacker.isPlayer || victim.isPlayer) {
+    soundManager.playTakedown();
+    const attackerName = attacker && attacker !== victim ? attacker.name : label;
+    if (victim.isPlayer || attacker?.isPlayer) {
       this.slowMoTimer = 1.1;
       this.cameraShakeIntensity = 0.85;
+      this.callbacks.onTakedownBanner({ title: victim.isPlayer ? 'VEÍCULO ELIMINADO' : 'ELIMINAÇÃO!', subtitle: `${attackerName} • ${label} • ${victim.name}`, isPlayer: Boolean(attacker?.isPlayer && attacker !== victim) });
     }
-
-    let bannerTitle = 'TAKEDOWN!';
-    let bannerSubtitle = `${attacker.name} destruiu ${victim.name}`;
-    if (type === 'SIDE_SLAM') {
-      bannerTitle = '💥 SIDE SLAM TAKEDOWN!';
-    } else if (type === 'ENVIRONMENTAL') {
-      bannerTitle = '⚡ DESTRUIÇÃO AMBIENTAL!';
-    }
-
-    this.callbacks.onTakedownBanner({
-      title: bannerTitle,
-      subtitle: bannerSubtitle,
-      isPlayer: attacker.isPlayer,
-    });
-
-    this.callbacks.onCombatLog({
-      id: Math.random().toString(),
-      victimName: victim.name,
-      attackerName: attacker.name,
-      isPlayerInvolved: attacker.isPlayer || victim.isPlayer,
-      type: 'TAKEDOWN',
-      message: `${attacker.name} eliminou ${victim.name}`,
-      timestamp: Date.now(),
-    });
+    this.callbacks.onCombatLog({ id: `${victim.id}-${this.matchTime}`, victimName: victim.name, attackerName,
+      isPlayerInvolved: victim.isPlayer || Boolean(attacker?.isPlayer), type: source === 'environment' ? 'ENVIRONMENTAL' : 'TAKEDOWN',
+      message: `${attackerName} eliminou ${victim.name} • ${label}`, timestamp: Date.now() });
   }
 
   private checkBarrelCollisions() {
@@ -495,12 +526,12 @@ export class GameEngine {
       if (barrel.exploded) return;
 
       this.allEntities.forEach((car) => {
-        if (car.state.isDead) return;
+        if (car.state.isDead || barrel.exploded) return;
 
         const dist = car.body.position.distanceTo(barrel.body.position);
         if (dist < 3.2 && car.state.speedKmh > 22) {
           barrel.exploded = true;
-          this.scene.remove(barrel.mesh);
+          barrel.mesh.removeFromParent();
           this.physics.world.removeBody(barrel.body);
 
           const blastPos = new THREE.Vector3(barrel.body.position.x, 1.2, barrel.body.position.z);
@@ -517,22 +548,9 @@ export class GameEngine {
               nearCar.body.position.x - blastPos.x,
               nearCar.body.position.z - blastPos.z
             );
-            if (distToBlast < 9.0) {
-              const dmg = Math.round((1 - distToBlast / 9.0) * 45);
-              nearCar.state.hp = Math.max(0, nearCar.state.hp - dmg);
-
-              const pushX = nearCar.body.position.x - blastPos.x;
-              const pushZ = nearCar.body.position.z - blastPos.z;
-              const pushDist = Math.hypot(pushX, pushZ) || 1;
-              nearCar.body.position.x += (pushX / pushDist) * 2.5;
-              nearCar.body.position.z += (pushZ / pushDist) * 2.5;
-              nearCar.forwardSpeed *= -0.3;
-              nearCar.lateralSpeed += (pushX / pushDist) * 12;
-
-              if (nearCar.state.hp <= 0 && !nearCar.state.isDead) {
-                nearCar.state.isDead = true;
-                this.handleTakedown(car, nearCar, 'ENVIRONMENTAL', nearCar.visuals.group.position);
-              }
+            if (distToBlast < ROYALE_CONFIG.environment.barrelRadius) {
+              const dmg = (1 - distToBlast / ROYALE_CONFIG.environment.barrelRadius) * ROYALE_CONFIG.environment.barrelDamage;
+              this.damage.apply(nearCar, dmg, 'environment', this.matchTime, car, 'BARRIL');
             }
           });
         }
@@ -542,41 +560,17 @@ export class GameEngine {
 
   private updateShrinkingZone(dt: number) {
     if (!this.arena) return;
-
-    if (this.matchTime > this.zoneShrinkDelay) {
-      const shrinkRate = (85 - this.minZoneRadius) / 120;
-      this.currentZoneRadius = Math.max(this.minZoneRadius, this.currentZoneRadius - shrinkRate * dt);
-      this.arena.updateZone(this.currentZoneRadius);
-
-      this.allEntities.forEach((car) => {
-        if (car.state.isDead) return;
-        const distCenter = Math.hypot(car.body.position.x, car.body.position.z);
-
-        if (distCenter > this.currentZoneRadius) {
-          const electricDamage = 14 * dt;
-          car.state.hp = Math.max(0, car.state.hp - electricDamage);
-
-          if (Math.random() > 0.4) {
-            this.effects.emitSparks(car.visuals.group.position, new THREE.Vector3(0, 1, 0), 3);
-          }
-
-          if (car.state.hp <= 0 && !car.state.isDead) {
-            car.state.isDead = true;
-            this.effects.emitExplosion(car.visuals.group.position, true);
-            soundManager.playTakedown();
-
-            this.callbacks.onCombatLog({
-              id: Math.random().toString(),
-              victimName: car.name,
-              attackerName: 'ZONA DE IMPACTO',
-              isPlayerInvolved: car.isPlayer,
-              type: 'ENVIRONMENTAL',
-              message: `${car.name} foi desintegrado pela barreira elétrica!`,
-              timestamp: Date.now(),
-            });
-          }
-        }
-      });
+    const state = this.zone.getState(this.matchTime);
+    this.currentZoneRadius = state.radius;
+    this.arena.updateZone(state.radius);
+    this.arena.nextZoneMesh.scale.setScalar(state.nextRadius);
+    this.arena.nextZoneMesh.visible = state.status !== 'final';
+    for (const car of this.allEntities) {
+      if (car.state.isDead) continue;
+      if (Math.hypot(car.body.position.x, car.body.position.z) > state.radius) {
+        this.damage.apply(car, state.damagePerSec * dt, 'environment', this.matchTime, undefined, 'ZONA');
+        if (Math.random() > 0.7) this.effects.emitSparks(car.visuals.group.position, new THREE.Vector3(0, 1, 0), 2);
+      }
     }
   }
 
@@ -709,7 +703,7 @@ export class GameEngine {
     }
 
     const aliveCount = this.allEntities.filter((e) => !e.state.isDead).length;
-    const placement = isVictory ? 1 : aliveCount + 1;
+    const placement = isVictory ? 1 : Math.min(6, aliveCount + 1);
 
     const stats: MatchStats = {
       placement,
@@ -723,6 +717,12 @@ export class GameEngine {
   }
 
   public cleanup() {
+    this.isRunning = false;
+    this.isPaused = false;
+    this.onBlur();
+    this.combat?.clear();
+    this.combat = null;
+    this.damage.reset();
     if (this.animationFrameId !== null) {
       cancelAnimationFrame(this.animationFrameId);
       this.animationFrameId = null;
@@ -733,21 +733,22 @@ export class GameEngine {
     soundManager.setDriftSound(false);
 
     if (this.showroomCar) {
-      this.scene.remove(this.showroomCar.group);
+      this.disposeObject(this.showroomCar.group);
       this.showroomCar = null;
     }
 
     this.allEntities.forEach((e) => {
-      this.scene.remove(e.visuals.group);
+      this.disposeObject(e.visuals.group);
       this.physics.world.removeBody(e.body);
     });
+    this.physics.vehicles.clear();
     this.allEntities = [];
     this.playerEntity = null;
     this.ai.clear();
     this.effects.clearAll();
 
     if (this.arena) {
-      this.scene.remove(this.arena.sceneGroup);
+      this.disposeObject(this.arena.sceneGroup);
       this.arena.staticBodies.forEach((b) => this.physics.world.removeBody(b));
       this.arena.barrels.forEach((b) => {
         if (!b.exploded) this.physics.world.removeBody(b.body);
@@ -756,11 +757,26 @@ export class GameEngine {
     }
   }
 
+  private disposeObject(object: THREE.Object3D) {
+    object.removeFromParent();
+    object.traverse(child => {
+      if (!(child instanceof THREE.Mesh)) return;
+      child.geometry.dispose();
+      const materials = Array.isArray(child.material) ? child.material : [child.material];
+      for (const material of materials) {
+        for (const value of Object.values(material)) if (value instanceof THREE.Texture) value.dispose();
+        material.dispose();
+      }
+    });
+  }
+
   public destroy() {
     this.cleanup();
+    this.effects.destroy();
     window.removeEventListener('resize', this.onResize);
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
+    window.removeEventListener('blur', this.onBlur);
     if (this.renderer.domElement && this.renderer.domElement.parentElement) {
       this.renderer.domElement.parentElement.removeChild(this.renderer.domElement);
     }

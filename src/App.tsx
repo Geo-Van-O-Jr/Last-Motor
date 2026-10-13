@@ -15,6 +15,7 @@ import {
   GameStatus,
   TakedownEvent,
   MatchStats,
+  ZoneState,
 } from './types/game';
 
 export default function App() {
@@ -30,6 +31,7 @@ export default function App() {
   const [survivorsCount, setSurvivorsCount] = useState<number>(6);
   const [matchTime, setMatchTime] = useState<number>(0);
   const [zoneRadius, setZoneRadius] = useState<number>(85);
+  const [zoneState, setZoneState] = useState<ZoneState | null>(null);
   const [allVehicles, setAllVehicles] = useState<VehicleState[]>([]);
   const [cameraMode, setCameraMode] = useState<string>('PERTO');
 
@@ -54,6 +56,7 @@ export default function App() {
         setSurvivorsCount(state.survivors);
         setMatchTime(state.matchTime);
         setZoneRadius(state.zoneRadius);
+        setZoneState(state.zone);
         setAllVehicles(state.allVehicles);
       },
       onTakedownBanner: (banner) => {
@@ -76,6 +79,7 @@ export default function App() {
 
     return () => {
       engine.destroy();
+      if (bannerTimeoutRef.current) clearTimeout(bannerTimeoutRef.current);
       engineRef.current = null;
     };
   }, []);
@@ -83,6 +87,7 @@ export default function App() {
   // Keyboard shortcut listener for Pause and Quick Restart
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.repeat) return;
       if (gameStatus === 'playing') {
         if (e.code === 'KeyP' || e.code === 'Escape') {
           e.preventDefault();
@@ -118,6 +123,7 @@ export default function App() {
     setSelectedColor(carColor);
     setCombatLogs([]);
     setTakedownBanner(null);
+    if (bannerTimeoutRef.current) clearTimeout(bannerTimeoutRef.current);
     setGameStatus('playing');
 
     if (engineRef.current) {
@@ -128,6 +134,7 @@ export default function App() {
   const handleRestart = useCallback(() => {
     setCombatLogs([]);
     setTakedownBanner(null);
+    if (bannerTimeoutRef.current) clearTimeout(bannerTimeoutRef.current);
     setGameStatus('playing');
 
     if (engineRef.current) {
@@ -166,8 +173,7 @@ export default function App() {
   const handleBackToMenu = useCallback(() => {
     setGameStatus('menu');
     if (engineRef.current) {
-      engineRef.current.cleanup();
-      engineRef.current.updateShowroom(selectedClass, selectedColor);
+      engineRef.current.returnToMenu(selectedClass, selectedColor);
     }
   }, [selectedClass, selectedColor]);
 
@@ -192,12 +198,14 @@ export default function App() {
           totalVehiclesCount={6}
           matchTimeSec={matchTime}
           zoneRadius={zoneRadius}
+          zoneState={zoneState}
           allVehicles={allVehicles}
           takedownBanner={takedownBanner}
           combatLogs={combatLogs}
           cameraMode={cameraMode}
           onVirtualInput={handleVirtualInput}
           onVirtualButton={handleVirtualButton}
+          onUseItem={() => engineRef.current?.useItem()}
         />
       )}
 

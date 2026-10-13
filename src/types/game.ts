@@ -24,7 +24,7 @@ export const VEHICLE_CLASSES: Record<VehicleClassType, VehicleClassConfig> = {
     id: 'INTERCEPTOR',
     name: 'Interceptor',
     subtitle: 'Ágil & Letal',
-    description: 'Pequeno, esportivo e veloz. Aceleração absurda e curvas afiadas. Ideal para investidas laterais e ataques surpresa.',
+    description: 'Pequeno, esportivo e veloz. Aceleração absurda e curvas afiadas. Ideal para posicionar disparos e escapar de foguetes.',
     maxSpeed: 195,
     acceleration: 28,
     handling: 3.4,
@@ -59,8 +59,8 @@ export const VEHICLE_CLASSES: Record<VehicleClassType, VehicleClassConfig> = {
   BRUISER: {
     id: 'BRUISER',
     name: 'Bruiser',
-    subtitle: 'Tanque Demolidor',
-    description: 'Veículo blindado pesado e intimidador. Força de impacto esmagadora e blindagem colossal para aniquilar qualquer obstáculo frontal.',
+    subtitle: 'Fortaleza Móvel',
+    description: 'Veículo blindado pesado e intimidador. Blindagem colossal para resistir ao combate e controlar a área com minas.',
     maxSpeed: 150,
     acceleration: 20,
     handling: 2.1,
@@ -77,6 +77,18 @@ export const VEHICLE_CLASSES: Record<VehicleClassType, VehicleClassConfig> = {
 };
 
 export type AIArchetype = 'aggressive' | 'opportunist' | 'defensive';
+
+export type WeaponType = 'ROCKET' | 'MINE' | 'ENERGY';
+export type ItemType = WeaponType | 'SHIELD' | 'REPAIR' | 'TURBO' | 'DOUBLE_AMMO';
+export interface EquippedItem { type: ItemType; ammo: number }
+export interface ZoneState {
+  phase: number;
+  status: 'waiting' | 'closing' | 'final';
+  radius: number;
+  nextRadius: number;
+  secondsRemaining: number;
+  damagePerSec: number;
+}
 
 export interface VehicleState {
   id: string;
@@ -100,6 +112,14 @@ export interface VehicleState {
   color: string;
   position: { x: number; y: number; z: number };
   heading: number; // yaw angle in rad
+  item: EquippedItem | null;
+  itemCooldown: number;
+  itemAcquired: number;
+  shieldTime: number;
+  turboTime: number;
+  doubleAmmoTime: number;
+  rocketThreats: number;
+  lockTargetName: string | null;
 }
 
 export type TakedownType = 'TAKEDOWN' | 'RAM' | 'SIDE_SLAM' | 'ENVIRONMENTAL';

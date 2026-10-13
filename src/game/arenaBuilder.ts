@@ -14,6 +14,7 @@ export interface ArenaComponents {
   barrels: DestructibleBarrel[];
   arenaRadius: number;
   zoneMesh: THREE.Mesh;
+  nextZoneMesh: THREE.Mesh;
   updateZone: (radius: number) => void;
 }
 
@@ -417,6 +418,12 @@ export function buildArena(scene: THREE.Scene, world: CANNON.World): ArenaCompon
   zoneMesh.position.set(0, 7.5, 0);
   arenaGroup.add(zoneMesh);
 
+  const nextZoneMesh = new THREE.Mesh(new THREE.RingGeometry(0.99, 1, 96), new THREE.MeshBasicMaterial({ color: '#facc15', transparent: true, opacity: 0.65, side: THREE.DoubleSide, depthWrite: false }));
+  nextZoneMesh.rotation.x = -Math.PI / 2;
+  nextZoneMesh.position.y = 0.08;
+  nextZoneMesh.scale.setScalar(70);
+  arenaGroup.add(nextZoneMesh);
+
   // Function to update safe zone radius
   const updateZone = (radius: number) => {
     zoneMesh.scale.set(radius / arenaRadius, 1, radius / arenaRadius);
@@ -440,6 +447,7 @@ export function buildArena(scene: THREE.Scene, world: CANNON.World): ArenaCompon
     barrels,
     arenaRadius,
     zoneMesh,
+    nextZoneMesh,
     updateZone,
   };
 }

@@ -69,7 +69,7 @@ export const PauseModal: React.FC<PauseModalProps> = ({ onResume, onRestart, onB
           <span className="flex items-center gap-1.5 font-bold">
             <Gamepad2 className="w-4 h-4 text-amber-400" /> CONTROLES:
           </span>
-          <span>W/A/S/D • Espaço (Drift) • Shift (Nitro) • C (Câmera)</span>
+          <span>W/A/S/D • Espaço • Shift • E (Item) • C (Câmera)</span>
         </div>
       </div>
     </div>
